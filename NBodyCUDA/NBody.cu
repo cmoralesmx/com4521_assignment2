@@ -137,7 +137,7 @@ int main(int argc, char *argv[]) {
 			}
 		}
 		if (seconds > -1.0f)
-			printf("Execution time %.0f seconds %.0f milliseconds", seconds, (seconds - (int)seconds) * 1000);
+			printf("Execution time %.0f seconds %.0f milliseconds\n", seconds, (seconds - (int)seconds) * 1000);
 		else
 			printf("No computation performed?");
 		//getchar();*/
@@ -409,25 +409,25 @@ void step(void)
 		parallelOverBodies <<< blocksPerGrid, threadsPerBlock >>>(d_nbodies, d_activityMap, numberOfBodies, gridLimit, gridDimmension);
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
-			printf("CUDA error in bodies kernel");
+			printf("CUDA error in bodies kernel\n");
 		
 		// synchronize the device
 		cudaDeviceSynchronize();
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
-			printf("CUDA error synchonizing the device after bodies were simulated");
+			printf("CUDA error synchonizing the device after bodies were simulated\n");
 		
 		// launch the activity map updater kernel
 		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, numberOfBodies, gridDimmension);
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
-			printf("CUDA error in activity map kernel");
+			printf("CUDA error in activity map kernel\n");
 
 		// synchronize the device
 		cudaDeviceSynchronize();
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
-			printf("CUDA error synchonizing the device after activity map was updated");
+			printf("CUDA error synchonizing the device after activity map was updated\n");
 
 		break;
 	}
@@ -440,22 +440,29 @@ __global__ void updateActivityMap(float * activityMap, int numberOfBodies, int g
 __global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension){
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-	float euclidean_x, euclidean_y, soft_norm, force_x, force_y;
-	float sum_x = 0, sum_y = 0;
+	/* stores the values euclidian_x, euclidean_y, soft_norm as:
+	value.x <- euclidian_x
+	value.y <- euclidean_y
+	value.z <- soft_norm
+	*/
+	float3 value; 
+	float2 force;
+	float2 sum;
+	sum.x = 0; sum.y = 0;
 
 	for (int j = 0; j < numberOfBodies; j++){
 		// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
-		euclidean_x = d_nbodies.x[j] - d_nbodies.x[idx];
-		euclidean_y = d_nbodies.y[j] - d_nbodies.y[idx];
-		soft_norm = (float)pow(euclidean_x * euclidean_x + euclidean_y * euclidean_y + SOFTENING_2, 1.5f) + ZERO;
+		value.x = d_nbodies.x[j] - d_nbodies.x[idx];
+		value.y = d_nbodies.y[j] - d_nbodies.y[idx];
+		value.z = (float)pow(value.x * value.x + value.y * value.y + SOFTENING_2, 1.5f);
 		// this simation is independent for x or y
-		sum_x += (d_nbodies.m[j] * euclidean_x) / soft_norm;
-		sum_y += (d_nbodies.m[j] * euclidean_y) / soft_norm;
+		sum.x += (d_nbodies.m[j] * value.x) / value.z;
+		sum.y += (d_nbodies.m[j] * value.y) / value.z;
 	}
 	// Calculate the force
 	// F_i = G * m_i * sum
-	force_x = G * d_nbodies.m[idx] * sum_x;
-	force_y = G * d_nbodies.m[idx] * sum_y;
+	force.x = G * d_nbodies.m[idx] * sum.x;
+	force.y = G * d_nbodies.m[idx] * sum.y;
 
 	// simulate the movement
 
@@ -468,16 +475,16 @@ __global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, int n
 	// update the velocity value 
 	// acceleration is also computed here, no need for independent computation
 	// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
-	d_nbodies.vx[idx] += dt * (force_x / (d_nbodies.m[idx] + ZERO));
-	d_nbodies.vy[idx] += dt * (force_y / (d_nbodies.m[idx] + ZERO));
+	d_nbodies.vx[idx] += dt * (force.x / d_nbodies.m[idx]);
+	d_nbodies.vy[idx] += dt * (force.y / d_nbodies.m[idx]);
 
 	/*
 	compute the position for a body in the activityMap and increase the
 	corresponding body count
 	index computed according to "The C programming guide" 2nd ed pp.113
 	*/
-	int col = (int)(d_nbodies.x[idx] / (gridLimit + ZERO));
-	int row = (int)(d_nbodies.y[idx] / (gridLimit + ZERO));
+	int col = (int)(d_nbodies.x[idx] / gridLimit);
+	int row = (int)(d_nbodies.y[idx] / gridLimit);
 	int cell = (int)(gridDimmension * row + col);
 	activityMap[cell] += 1.0f;
 }
