@@ -14,6 +14,11 @@
 #define ZERO 1e-6f
 #define THREADS_PER_BLOCK 128
 
+struct nbodies{
+	float *x, *y, *vx, *vy, *m;
+};
+struct nbodies d_nbodies, h_nbodies;
+
 void print_help();
 void simulate(int iterations);
 void step(void);
@@ -23,19 +28,16 @@ int readLine(char buffer[], FILE *f);
 char* copyString(const char * source);
 int prepareData(const char * inputFilename);
 char * getFilename(int argc, char *argv[], int secondValidCount, int secondPosition);
-//int prepareSimulationData(int argc, char *argv[]);
-//int prepareVisualisationData(int argc, char *argv[]);
 void assignDefaultValues(nbody *row);
+void assignDefaultValuesSOA(int i);
 void generateRandomData();
 void displayData();
-//void increaseActivityMapCount(nbody *body);
-//void increaseActivityMapCountOMP(nbody *body);
-__global__ void parallelOverBodies(nbody * data, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension);
+__global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension);
 int allocateDeviceMemory();
 __global__ void updateActivityMap(float * activityMap, int numberOfBodies, int gridDimmension);
 
 MODE mode;
-nbody * data, * d_data;
+//nbody * data, * d_data;
 int numberOfBodies, gridDimmension;
 float * activityMap, gridLimit, * d_activityMap;
 time_t t;
@@ -69,7 +71,13 @@ int main(int argc, char *argv[]) {
 		}
 
 		// Allocate heap memory
-		data = (nbody*)malloc(sizeof(nbody) * numberOfBodies);
+		//data = (nbody*)malloc(sizeof(nbody) * numberOfBodies);
+		size_t size = sizeof(float) * numberOfBodies;
+		h_nbodies.x = (float*)malloc(size);
+		h_nbodies.y = (float*)malloc(size);
+		h_nbodies.vx = (float*)malloc(size);
+		h_nbodies.vy = (float*)malloc(size);
+		h_nbodies.m = (float*)malloc(size);
 		activityMap = (float*)malloc(sizeof(float) * gridDimmension * gridDimmension);
 		for (int v = 0; v < gridDimmension * gridDimmension; v++)
 			activityMap[v] = 0;
@@ -115,11 +123,11 @@ int main(int argc, char *argv[]) {
 				// configure and start the visualiser (then output the timing results).
 				initViewer(numberOfBodies, gridDimmension, mode, &step);
 				if (mode == CUDA){
-					setNBodyPositions(d_data);
+					setNBodyPositions2f(d_nbodies.x, d_nbodies.y);
 					setHistogramData(d_activityMap);
 				}
 				else{
-					setNBodyPositions(data);
+					setNBodyPositions2f(h_nbodies.x, h_nbodies.y);
 					setHistogramData(activityMap);
 				}
 				begin = clock();
@@ -129,16 +137,24 @@ int main(int argc, char *argv[]) {
 			}
 		}
 		if (seconds > -1.0f)
-			printf("Execution time %.0f seconds %.0f milliseconds\n", seconds, (seconds - (int)seconds) * 1000);
+			printf("Execution time %.0f seconds %.0f milliseconds", seconds, (seconds - (int)seconds) * 1000);
 		else
 			printf("No computation performed?");
 		//getchar();*/
 	}
 	// release heap memory
 	free(activityMap);
-	free(data);
+	free(h_nbodies.x);
+	free(h_nbodies.y);
+	free(h_nbodies.vx);
+	free(h_nbodies.vy);
+	free(h_nbodies.m);
 	if (mode == CUDA){
-		cudaFree(d_data);
+		cudaFree(&d_nbodies.x);
+		cudaFree(&d_nbodies.y);
+		cudaFree(&d_nbodies.vx);
+		cudaFree(&d_nbodies.vy);
+		cudaFree(&d_nbodies.m);
 		cudaFree(d_activityMap);
 	}
 	
@@ -147,10 +163,15 @@ int main(int argc, char *argv[]) {
 
 int allocateDeviceMemory(){
 	// allocate device dynamic global memory
-	cudaError_t cudaStatus = cudaMalloc(&d_data, sizeof(nbody) * numberOfBodies);
-	if (cudaStatus == cudaSuccess)
+	cudaError_t cudaStatus1 = cudaMalloc((void **)&d_nbodies.x, sizeof(d_nbodies.x) * numberOfBodies);
+	cudaError_t cudaStatus2 = cudaMalloc((void **)&d_nbodies.y, sizeof(d_nbodies.y) * numberOfBodies);
+	cudaError_t cudaStatus3 = cudaMalloc((void **)&d_nbodies.vx, sizeof(d_nbodies.vx) * numberOfBodies);
+	cudaError_t cudaStatus4 = cudaMalloc((void **)&d_nbodies.vy, sizeof(d_nbodies.vy) * numberOfBodies);
+	cudaError_t cudaStatus5 = cudaMalloc((void **)&d_nbodies.m, sizeof(d_nbodies.m) * numberOfBodies);
+	if (cudaStatus1 == cudaSuccess && cudaStatus2 == cudaSuccess && cudaStatus3 == cudaSuccess
+		&& cudaStatus4 == cudaSuccess && cudaStatus5 == cudaSuccess)
 	{
-		cudaStatus = cudaMalloc(&d_activityMap, sizeof(float) * gridDimmension * gridDimmension);
+		cudaError_t cudaStatus = cudaMalloc((void **)&d_activityMap, sizeof(float) * gridDimmension * gridDimmension);
 		if (cudaStatus == cudaSuccess)
 		{
 			cudaStatus = cudaMemcpy(d_activityMap, activityMap, sizeof(float) * gridDimmension * gridDimmension, cudaMemcpyHostToDevice);
@@ -217,9 +238,15 @@ int prepareData(const char * inputFilename){
 	}
 	if (mode == CUDA){
 		// copy host data to device
-		cudaError_t cudaStatus;
-		cudaStatus = cudaMemcpy(d_data, data, numberOfBodies * sizeof(nbody), cudaMemcpyHostToDevice);
-		if (cudaStatus != cudaSuccess){
+		cudaError_t cudaStatus1, cudaStatus2, cudaStatus3, cudaStatus4, cudaStatus5;
+		size_t size = sizeof(float) * numberOfBodies;
+		cudaStatus1 = cudaMemcpy(d_nbodies.x, h_nbodies.x, size, cudaMemcpyHostToDevice);
+		cudaStatus2 = cudaMemcpy(d_nbodies.y, h_nbodies.y, size, cudaMemcpyHostToDevice);
+		cudaStatus3 = cudaMemcpy(d_nbodies.vx, h_nbodies.vx, size, cudaMemcpyHostToDevice);
+		cudaStatus4 = cudaMemcpy(d_nbodies.vy, h_nbodies.vy, size, cudaMemcpyHostToDevice);
+		cudaStatus5 = cudaMemcpy(d_nbodies.m, h_nbodies.m, size, cudaMemcpyHostToDevice);
+		if (cudaStatus1 != cudaSuccess || cudaStatus2 != cudaSuccess || cudaStatus3 != cudaSuccess
+			|| cudaStatus4 != cudaSuccess || cudaStatus5 != cudaSuccess){
 			if (DEBUG)
 				printf("ERROR copying host data to device\n");
 			return -2;
@@ -231,8 +258,8 @@ int prepareData(const char * inputFilename){
 void displayData(){
 	for (int i = 0; i < numberOfBodies; i++){
 		if (numberOfBodies < 10 || i < 5 || i > numberOfBodies - 5)
-			printf("[%d] x=%f, y=%f, vx=%f, vy=%f, mass=%f\n", i, data[i].x,
-				data[i].y, data[i].vx, data[i].vy, data[i].m);
+			printf("[%d] x=%f, y=%f, vx=%f, vy=%f, mass=%f\n", i, h_nbodies.x[i],
+				h_nbodies.y[i], h_nbodies.vx[i], h_nbodies.vy[i], h_nbodies.m[i]);
 	}
 }
 /* function to simplify memory allocation and content copy
@@ -274,39 +301,39 @@ void step(void)
 
 			for (j = 0; j < numberOfBodies; j++){
 				// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
-				euclidean_x = data[j].x - data[i].x;
-				euclidean_y = data[j].y - data[i].y;
+				euclidean_x = h_nbodies.x[j] - h_nbodies.x[i];
+				euclidean_y = h_nbodies.y[j] - h_nbodies.y[i];
 				soft_norm = (float)pow(euclidean_x * euclidean_x + euclidean_y * euclidean_y + SOFTENING_2, 1.5f) + ZERO;
 				// this simation is independent for x or y
-				sum_x += (data[j].m * euclidean_x) / soft_norm;
-				sum_y += (data[j].m * euclidean_y) / soft_norm;
+				sum_x += (h_nbodies.m[j] * euclidean_x) / soft_norm;
+				sum_y += (h_nbodies.m[j] * euclidean_y) / soft_norm;
 			}
 			// Calculate the force
 			// F_i = G * m_i * sum
-			force_x = G * data[i].m * sum_x;
-			force_y = G * data[i].m * sum_y;
+			force_x = G * h_nbodies.m[i] * sum_x;
+			force_y = G * h_nbodies.m[i] * sum_y;
 
 			// simulate the movement
 
 			// calculate the position
 			// WE DO THIS FIRST due to its dependance on current velocity
 			// x_t+1 = x_t + dt * v_t
-			data[i].x += dt * data[i].vx;
-			data[i].y += dt * data[i].vy;
+			h_nbodies.x[i] += dt * h_nbodies.vx[i];
+			h_nbodies.y[i] += dt * h_nbodies.vy[i];
 
 			// update the velocity value 
 			// acceleration is also computed here, no need for independent computation
 			// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
-			data[i].vx += dt * (force_x / (data[i].m + ZERO));
-			data[i].vy += dt * (force_y / (data[i].m + ZERO));
+			h_nbodies.vx[i] += dt * (force_x / (h_nbodies.m[i] + ZERO));
+			h_nbodies.vy[i] += dt * (force_y / (h_nbodies.m[i] + ZERO));
 
 			/*
 			compute the position for a body in the activityMap and increase the
 			corresponding body count
 			index computed according to "The C programming guide" 2nd ed pp.113
 			*/
-			int col = (int)(data[i].x / (gridLimit + ZERO));
-			int row = (int)(data[i].y / (gridLimit + ZERO));
+			int col = (int)(h_nbodies.x[i] / (gridLimit + ZERO));
+			int row = (int)(h_nbodies.y[i] / (gridLimit + ZERO));
 			int cell = (int)(gridDimmension * row + col);
 			activityMap[cell] += 1.0f;
 		}
@@ -327,43 +354,43 @@ void step(void)
 			float euclidean_x, euclidean_y, soft_norm, force_x, force_y;
 			float sum_x = 0, sum_y = 0;
 
-#pragma omp parallel for reduction(+: sum_x, sum_y) default(none) shared(data, activityMap, numberOfBodies, i, gridLimit, gridDimmension) private (euclidean_x, euclidean_y, soft_norm)
+#pragma omp parallel for reduction(+: sum_x, sum_y) default(none) shared(h_nbodies, activityMap, numberOfBodies, i, gridLimit, gridDimmension) private (euclidean_x, euclidean_y, soft_norm)
 			for (j = 0; j < numberOfBodies; j++)
 			{
 				// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
-				euclidean_x = data[j].x - data[i].x;
-				euclidean_y = data[j].y - data[i].y;
-				soft_norm = (float)pow(euclidean_x * euclidean_x + euclidean_y * euclidean_y + SOFTENING * SOFTENING, 1.5f) + ZERO;
-				// this sumation is independent for x or y
-				sum_x += (data[j].m * euclidean_x) / soft_norm;
-				sum_y += (data[j].m * euclidean_y) / soft_norm;
+				euclidean_x = h_nbodies.x[j] - h_nbodies.x[i];
+				euclidean_y = h_nbodies.y[j] - h_nbodies.y[i];
+				soft_norm = (float)pow(euclidean_x * euclidean_x + euclidean_y * euclidean_y + SOFTENING_2, 1.5f) + ZERO;
+				// this simation is independent for x or y
+				sum_x += (h_nbodies.m[j] * euclidean_x) / soft_norm;
+				sum_y += (h_nbodies.m[j] * euclidean_y) / soft_norm;
 			}
 			// Calculate the force
 			// F_i = G * m_i * sum
-			force_x = G * data[i].m * sum_x;
-			force_y = G * data[i].m * sum_y;
+			force_x = G * h_nbodies.m[i] * sum_x;
+			force_y = G * h_nbodies.m[i] * sum_y;
 
 			// simulate the movement
 
 			// calculate the position
 			// WE DO THIS FIRST due to its dependance on current velocity
 			// x_t+1 = x_t + dt * v_t
-			data[i].x += dt * data[i].vx;
-			data[i].y += dt * data[i].vy;
+			h_nbodies.x[i] += dt * h_nbodies.vx[i];
+			h_nbodies.y[i] += dt * h_nbodies.vy[i];
 
 			// update the velocity value 
 			// acceleration is also computed here, no need for independent computation
 			// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
-			data[i].vx += dt * (force_x / (data[i].m + ZERO));
-			data[i].vy += dt * (force_y / (data[i].m + ZERO));
+			h_nbodies.vx[i] += dt * (force_x / (h_nbodies.m[i] + ZERO));
+			h_nbodies.vy[i] += dt * (force_y / (h_nbodies.m[i] + ZERO));
 
 			/*
 			compute the position for a body in the activityMap and increase the
 			corresponding body count
 			index computed according to "The C programming guide" 2nd ed pp.113
 			*/
-			int col = (int)(data[i].x / (gridLimit + ZERO));
-			int row = (int)(data[i].y / (gridLimit + ZERO));
+			int col = (int)(h_nbodies.x[i] / (gridLimit + ZERO));
+			int row = (int)(h_nbodies.y[i] / (gridLimit + ZERO));
 			int cell = (int)(gridDimmension * row + col);
 #pragma omp atomic
 			activityMap[cell] += 1.0f;
@@ -377,7 +404,9 @@ void step(void)
 		break;
 	case CUDA:
 		// launch the bodies kernel
-		parallelOverBodies <<< numberOfBodies / THREADS_PER_BLOCK, THREADS_PER_BLOCK >>>(d_data, d_activityMap, numberOfBodies, gridLimit, gridDimmension);
+		dim3 blocksPerGrid(numberOfBodies/THREADS_PER_BLOCK);
+		dim3 threadsPerBlock(THREADS_PER_BLOCK);
+		parallelOverBodies <<< blocksPerGrid, threadsPerBlock >>>(d_nbodies, d_activityMap, numberOfBodies, gridLimit, gridDimmension);
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in bodies kernel");
@@ -389,7 +418,7 @@ void step(void)
 			printf("CUDA error synchonizing the device after bodies were simulated");
 		
 		// launch the activity map updater kernel
-		updateActivityMap <<< numberOfBodies / THREADS_PER_BLOCK, THREADS_PER_BLOCK >>>(d_activityMap, numberOfBodies, gridDimmension);
+		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, numberOfBodies, gridDimmension);
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in activity map kernel");
@@ -408,7 +437,7 @@ __global__ void updateActivityMap(float * activityMap, int numberOfBodies, int g
 	activityMap[idx] /= numberOfBodies;
 	activityMap[idx] *= gridDimmension;
 }
-__global__ void parallelOverBodies(nbody * data, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension){
+__global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension){
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
 	float euclidean_x, euclidean_y, soft_norm, force_x, force_y;
@@ -416,39 +445,39 @@ __global__ void parallelOverBodies(nbody * data, float * activityMap, int number
 
 	for (int j = 0; j < numberOfBodies; j++){
 		// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
-		euclidean_x = data[j].x - data[idx].x;
-		euclidean_y = data[j].y - data[idx].y;
+		euclidean_x = d_nbodies.x[j] - d_nbodies.x[idx];
+		euclidean_y = d_nbodies.y[j] - d_nbodies.y[idx];
 		soft_norm = (float)pow(euclidean_x * euclidean_x + euclidean_y * euclidean_y + SOFTENING_2, 1.5f) + ZERO;
 		// this simation is independent for x or y
-		sum_x += (data[j].m * euclidean_x) / soft_norm;
-		sum_y += (data[j].m * euclidean_y) / soft_norm;
+		sum_x += (d_nbodies.m[j] * euclidean_x) / soft_norm;
+		sum_y += (d_nbodies.m[j] * euclidean_y) / soft_norm;
 	}
 	// Calculate the force
 	// F_i = G * m_i * sum
-	force_x = G * data[idx].m * sum_x;
-	force_y = G * data[idx].m * sum_y;
+	force_x = G * d_nbodies.m[idx] * sum_x;
+	force_y = G * d_nbodies.m[idx] * sum_y;
 
 	// simulate the movement
 
 	// calculate the position
 	// WE DO THIS FIRST due to its dependance on current velocity
 	// x_t+1 = x_t + dt * v_t
-	data[idx].x += dt * data[idx].vx;
-	data[idx].y += dt * data[idx].vy;
+	d_nbodies.x[idx] += dt * d_nbodies.vx[idx];
+	d_nbodies.y[idx] += dt * d_nbodies.vy[idx];
 
 	// update the velocity value 
 	// acceleration is also computed here, no need for independent computation
 	// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
-	data[idx].vx += dt * (force_x / (data[idx].m + ZERO));
-	data[idx].vy += dt * (force_y / (data[idx].m + ZERO));
+	d_nbodies.vx[idx] += dt * (force_x / (d_nbodies.m[idx] + ZERO));
+	d_nbodies.vy[idx] += dt * (force_y / (d_nbodies.m[idx] + ZERO));
 
 	/*
 	compute the position for a body in the activityMap and increase the
 	corresponding body count
 	index computed according to "The C programming guide" 2nd ed pp.113
 	*/
-	int col = (int)(data[idx].x / (gridLimit + ZERO));
-	int row = (int)(data[idx].y / (gridLimit + ZERO));
+	int col = (int)(d_nbodies.x[idx] / (gridLimit + ZERO));
+	int row = (int)(d_nbodies.y[idx] / (gridLimit + ZERO));
 	int cell = (int)(gridDimmension * row + col);
 	activityMap[cell] += 1.0f;
 }
@@ -556,7 +585,7 @@ void generateRandomData(){
 	if (DEBUG)
 		printf("Generating random data for %d bodies. ", numberOfBodies);
 	for (int i = 0; i < numberOfBodies; i++)
-		assignDefaultValues(&data[i]);
+		assignDefaultValuesSOA(i);
 	if (DEBUG)
 		printf("Done.\n");
 }
@@ -582,6 +611,18 @@ void assignDefaultValues(nbody *row){
 	row->vx = 0;
 	row->vy = 0;
 	row->m = 1.0f / (float)numberOfBodies;
+}
+void assignDefaultValuesSOA(int i){
+	//(double)rand() / (double)((unsigned)RAND_MAX + 1)
+	h_nbodies.x[i] = (float)((double)rand() / (double)((unsigned)RAND_MAX + 1));
+	h_nbodies.y[i] = (float)((double)rand() / (double)((unsigned)RAND_MAX + 1));
+	if (h_nbodies.x[i] < 0.000001)
+		h_nbodies.x[i] = 0;
+	if (h_nbodies.y[i] < 0.000001)
+		h_nbodies.y[i] = 0;
+	h_nbodies.vx[i] = 0;
+	h_nbodies.vy[i] = 0;
+	h_nbodies.m[i] = 1.0f / (float)numberOfBodies;
 }
 /*
 Loads the data from specified input file.
@@ -615,13 +656,13 @@ int fileReader(const char *filename){
 			return -1;
 		}
 
-		assignDefaultValues(&data[body_count]);
+		assignDefaultValuesSOA(body_count);
 
 		if (body_count < numberOfBodies){
 			// valid format: 0.5f, 0.5f, 0.0f, 0.0f, 0.1f
-			sscanf(buffer, "%ff, %ff, %ff, %ff, %ff", &data[body_count].x,
-				&data[body_count].y, &data[body_count].vx,
-				&data[body_count].vy, &data[body_count].m);
+			sscanf(buffer, "%ff, %ff, %ff, %ff, %ff", &h_nbodies.x[body_count],
+				&h_nbodies.y[body_count], &h_nbodies.vx[body_count],
+				&h_nbodies.vy[body_count], &h_nbodies.m[body_count]);
 			++body_count;
 		}
 	}
