@@ -12,7 +12,7 @@
 #define SOFTENING_2 4.0f
 #define DEBUG 0
 #define ZERO 1e-6f
-#define THREADS_PER_BLOCK 128
+#define THREADS_PER_BLOCK 512
 
 struct nbodies{
 	float *x, *y, *vx, *vy, *m;
@@ -404,9 +404,15 @@ void step(void)
 		break;
 	case CUDA:
 		// launch the bodies kernel
-		dim3 blocksPerGrid(numberOfBodies/THREADS_PER_BLOCK);
-		dim3 threadsPerBlock(THREADS_PER_BLOCK);
-		parallelOverBodies <<< blocksPerGrid, threadsPerBlock >>>(d_nbodies, d_activityMap, numberOfBodies, gridLimit, gridDimmension);
+		//dim3 blocksPerGrid(numberOfBodies / 32, numberOfBodies / 32);
+		//dim3 threadsPerBlock(32, 32); //256 + 128 = 384
+		/*int blockSize;
+		int minGridSize;
+		int gridSize;*/
+		/*cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, parallelOverBodies, 0, 0);
+		gridSize = (numberOfBodies + blockSize - 1) / blockSize;
+		printf("1 Estimated gridSize: %d, blockSize: %d\n", gridSize, blockSize);*/
+		parallelOverBodies << < (numberOfBodies + THREADS_PER_BLOCK - 1)/ THREADS_PER_BLOCK, THREADS_PER_BLOCK >> >(d_nbodies, d_activityMap, numberOfBodies, gridLimit, gridDimmension);
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in bodies kernel\n");
@@ -418,7 +424,10 @@ void step(void)
 			printf("CUDA error synchonizing the device after bodies were simulated\n");
 		
 		// launch the activity map updater kernel
-		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, numberOfBodies, gridDimmension);
+		/*cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, updateActivityMap, 0, 0);
+		gridSize = (numberOfBodies + blockSize - 1) / blockSize;
+		printf("2 Estimated gridSize: %d, blockSize: %d\n", gridSize, blockSize);*/
+		updateActivityMap << < (numberOfBodies + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> >(d_activityMap, numberOfBodies, gridDimmension);
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in activity map kernel\n");
