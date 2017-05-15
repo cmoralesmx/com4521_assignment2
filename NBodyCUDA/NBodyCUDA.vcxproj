@@ -73,7 +73,11 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
       <Defines>_CRT_SECURE_NO_WARNINGS</Defines>
       <AdditionalCompilerOptions>
       </AdditionalCompilerOptions>
-      <AdditionalOptions>-Wno-deprecated-gpu-targets -Xcompiler "/openmp" %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-Wno-deprecated-gpu-targets -Xcompiler "/openmp" -Xptxas -dlcm=ca %(AdditionalOptions)</AdditionalOptions>
+      <GenerateLineInfo>true</GenerateLineInfo>
+      <FastMath>true</FastMath>
+      <PtxAsOptionV>true</PtxAsOptionV>
+      <MaxRegCount>32</MaxRegCount>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -103,7 +107,11 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
       <Defines>_CRT_SECURE_NO_WARNINGS</Defines>
       <AdditionalCompilerOptions>
       </AdditionalCompilerOptions>
-      <AdditionalOptions>-Wno-deprecated-gpu-targets -Xcompiler "/openmp" %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-Wno-deprecated-gpu-targets -Xcompiler "/openmp" -Xptxas -dlcm=ca %(AdditionalOptions)</AdditionalOptions>
+      <GenerateLineInfo>true</GenerateLineInfo>
+      <FastMath>true</FastMath>
+      <PtxAsOptionV>true</PtxAsOptionV>
+      <MaxRegCount>32</MaxRegCount>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>

@@ -15,44 +15,45 @@
 #define THREADS_PER_BLOCK 512
 
 struct nbodies{
-	float *x, *y, *vx, *vy, *m;
+	float *x, *y, *vx, *vy, *m, *inv_m;
 };
-struct nbodies d_nbodies, h_nbodies;
+struct nbodies h_nbodies, d_nbodies;
 
 void print_help();
 void simulate(int iterations);
 void step(void);
-int operation_mode(const int argc, char *argv[]);
+short operation_mode(const int argc, char *argv[]);
 int fileReader(const char *filename);
 int readLine(char buffer[], FILE *f);
 char* copyString(const char * source);
-int prepareData(const char * inputFilename);
+short prepareData(const char * inputFilename);
 char * getFilename(int argc, char *argv[], int secondValidCount, int secondPosition);
 void assignDefaultValues(nbody *row);
 void assignDefaultValuesSOA(int i);
 void generateRandomData();
 void displayData();
-__global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension);
-int allocateDeviceMemory();
-__global__ void updateActivityMap(float * activityMap, int numberOfBodies, int gridDimmension);
+__global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, const int numberOfBodies, const float gridLimit, const unsigned short gridDimmension);
+short allocateDeviceMemory();
+__global__ void updateActivityMap(float * activityMap, const float inverse_numberOfBodies, const unsigned short gridDimmension, const unsigned short n2);
 
 MODE mode;
-//nbody * data, * d_data;
-int numberOfBodies, gridDimmension;
-float * activityMap, gridLimit, * d_activityMap;
+int numberOfBodies;
+float inverse_numberOfBodies;
+short gridDimmension;
+float * activityMap, gridLimit, *d_activityMap;
 time_t t;
 
 
 int main(int argc, char *argv[]) {
 	int iterations;
 	float seconds = -1.0f;
-
+	
 	srand((unsigned)time(NULL));
 	clock_t begin = clock(), end = clock();
 
 	// Check the received parameters follow the stablished format
 	// and find if this is a simulation or visualisation
-	int opMode = operation_mode(argc - 1, argv + 1);
+	short opMode = operation_mode(argc - 1, argv + 1);
 
 	if ( opMode == -1 ){
 		printf("Wrong parameters provided\n");
@@ -61,6 +62,7 @@ int main(int argc, char *argv[]) {
 	}
 	else {
 		numberOfBodies = atoi(argv[1]); // N
+		inverse_numberOfBodies = 1.0f / numberOfBodies;
 		gridDimmension = atoi(argv[2]); // D
 		// calculate the ranges for the "bins" of the grid
 		gridLimit = 1.0f / (gridDimmension - 1);
@@ -78,6 +80,7 @@ int main(int argc, char *argv[]) {
 		h_nbodies.vx = (float*)malloc(size);
 		h_nbodies.vy = (float*)malloc(size);
 		h_nbodies.m = (float*)malloc(size);
+		h_nbodies.inv_m = (float*)malloc(size);
 		activityMap = (float*)malloc(sizeof(float) * gridDimmension * gridDimmension);
 		for (int v = 0; v < gridDimmension * gridDimmension; v++)
 			activityMap[v] = 0;
@@ -137,7 +140,7 @@ int main(int argc, char *argv[]) {
 			}
 		}
 		if (seconds > -1.0f)
-			printf("Execution time %.0f seconds %.0f milliseconds\n", seconds, (seconds - (int)seconds) * 1000);
+			printf("Execution time %.0f seconds %03.0f milliseconds\n", seconds, (seconds - (int)seconds) * 1000);
 		else
 			printf("No computation performed?");
 		//getchar();*/
@@ -149,29 +152,33 @@ int main(int argc, char *argv[]) {
 	free(h_nbodies.vx);
 	free(h_nbodies.vy);
 	free(h_nbodies.m);
+	free(h_nbodies.inv_m);
 	if (mode == CUDA){
+		cudaDeviceReset();
 		cudaFree(&d_nbodies.x);
 		cudaFree(&d_nbodies.y);
 		cudaFree(&d_nbodies.vx);
 		cudaFree(&d_nbodies.vy);
 		cudaFree(&d_nbodies.m);
-		cudaFree(d_activityMap);
+		cudaFree(&d_nbodies.inv_m);
+		cudaFree(&d_activityMap);
 	}
 	
 	return 0;
 }
 
-int allocateDeviceMemory(){
+short allocateDeviceMemory(){
 	// allocate device dynamic global memory
 	cudaError_t cudaStatus1 = cudaMalloc((void **)&d_nbodies.x, sizeof(d_nbodies.x) * numberOfBodies);
 	cudaError_t cudaStatus2 = cudaMalloc((void **)&d_nbodies.y, sizeof(d_nbodies.y) * numberOfBodies);
 	cudaError_t cudaStatus3 = cudaMalloc((void **)&d_nbodies.vx, sizeof(d_nbodies.vx) * numberOfBodies);
 	cudaError_t cudaStatus4 = cudaMalloc((void **)&d_nbodies.vy, sizeof(d_nbodies.vy) * numberOfBodies);
 	cudaError_t cudaStatus5 = cudaMalloc((void **)&d_nbodies.m, sizeof(d_nbodies.m) * numberOfBodies);
+	cudaError_t cudaStatus6 = cudaMalloc((void **)&d_nbodies.inv_m, sizeof(d_nbodies.inv_m) * numberOfBodies);
 	if (cudaStatus1 == cudaSuccess && cudaStatus2 == cudaSuccess && cudaStatus3 == cudaSuccess
-		&& cudaStatus4 == cudaSuccess && cudaStatus5 == cudaSuccess)
+		&& cudaStatus4 == cudaSuccess && cudaStatus5 == cudaSuccess && cudaStatus6 == cudaSuccess)
 	{
-		cudaError_t cudaStatus = cudaMalloc((void **)&d_activityMap, sizeof(float) * gridDimmension * gridDimmension);
+		cudaError_t cudaStatus = cudaMalloc((void**)&d_activityMap, sizeof(float) * gridDimmension * gridDimmension);
 		if (cudaStatus == cudaSuccess)
 		{
 			cudaStatus = cudaMemcpy(d_activityMap, activityMap, sizeof(float) * gridDimmension * gridDimmension, cudaMemcpyHostToDevice);
@@ -209,7 +216,7 @@ output
 1	the number of records and number of bodies does not match
 0	process completed successfully
 */
-int loadOrGenerateData(const char * inputFilename){
+short loadOrGenerateData(const char * inputFilename){
 	if (inputFilename != NULL){
 		// read data from file
 		return fileReader(inputFilename);
@@ -230,23 +237,24 @@ output
 0	process completed successfully
 -2	CUDA error copying data to device
 */
-int prepareData(const char * inputFilename){
-	int loadDataErrors = loadOrGenerateData(inputFilename);
+short prepareData(const char * inputFilename){
+	short loadDataErrors = loadOrGenerateData(inputFilename);
 	if (loadDataErrors != 0){
 		if (DEBUG)
 			printf("ERROR loading or generating data!\n");
 	}
 	if (mode == CUDA){
 		// copy host data to device
-		cudaError_t cudaStatus1, cudaStatus2, cudaStatus3, cudaStatus4, cudaStatus5;
+		cudaError_t cudaStatus1, cudaStatus2, cudaStatus3, cudaStatus4, cudaStatus5, cudaStatus6;
 		size_t size = sizeof(float) * numberOfBodies;
 		cudaStatus1 = cudaMemcpy(d_nbodies.x, h_nbodies.x, size, cudaMemcpyHostToDevice);
 		cudaStatus2 = cudaMemcpy(d_nbodies.y, h_nbodies.y, size, cudaMemcpyHostToDevice);
 		cudaStatus3 = cudaMemcpy(d_nbodies.vx, h_nbodies.vx, size, cudaMemcpyHostToDevice);
 		cudaStatus4 = cudaMemcpy(d_nbodies.vy, h_nbodies.vy, size, cudaMemcpyHostToDevice);
 		cudaStatus5 = cudaMemcpy(d_nbodies.m, h_nbodies.m, size, cudaMemcpyHostToDevice);
+		cudaStatus6 = cudaMemcpy(d_nbodies.inv_m, h_nbodies.inv_m, size, cudaMemcpyHostToDevice);
 		if (cudaStatus1 != cudaSuccess || cudaStatus2 != cudaSuccess || cudaStatus3 != cudaSuccess
-			|| cudaStatus4 != cudaSuccess || cudaStatus5 != cudaSuccess){
+			|| cudaStatus4 != cudaSuccess || cudaStatus5 != cudaSuccess || cudaStatus6 != cudaSuccess){
 			if (DEBUG)
 				printf("ERROR copying host data to device\n");
 			return -2;
@@ -404,100 +412,95 @@ void step(void)
 		break;
 	case CUDA:
 		// launch the bodies kernel
-		//dim3 blocksPerGrid(numberOfBodies / 32, numberOfBodies / 32);
-		//dim3 threadsPerBlock(32, 32); //256 + 128 = 384
-		/*int blockSize;
-		int minGridSize;
-		int gridSize;*/
-		/*cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, parallelOverBodies, 0, 0);
-		gridSize = (numberOfBodies + blockSize - 1) / blockSize;
-		printf("1 Estimated gridSize: %d, blockSize: %d\n", gridSize, blockSize);*/
-		parallelOverBodies << < (numberOfBodies + THREADS_PER_BLOCK - 1)/ THREADS_PER_BLOCK, THREADS_PER_BLOCK >> >(d_nbodies, d_activityMap, numberOfBodies, gridLimit, gridDimmension);
+		dim3 blocksPerGrid((numberOfBodies + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, 1);
+		dim3 threadsPerBlock(THREADS_PER_BLOCK, 1);
+		
+		parallelOverBodies << < blocksPerGrid, threadsPerBlock >> >(d_nbodies, d_activityMap, numberOfBodies, 1.0f/gridLimit, gridDimmension);
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in bodies kernel\n");
 		
-		// synchronize the device
-		cudaDeviceSynchronize();
-		cudaStatus = cudaGetLastError();
-		if (cudaStatus != cudaSuccess)
-			printf("CUDA error synchonizing the device after bodies were simulated\n");
-		
 		// launch the activity map updater kernel
-		/*cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, updateActivityMap, 0, 0);
-		gridSize = (numberOfBodies + blockSize - 1) / blockSize;
-		printf("2 Estimated gridSize: %d, blockSize: %d\n", gridSize, blockSize);*/
-		updateActivityMap << < (numberOfBodies + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> >(d_activityMap, numberOfBodies, gridDimmension);
+		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, inverse_numberOfBodies, gridDimmension, gridDimmension * gridDimmension);
 		cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in activity map kernel\n");
 
-		// synchronize the device
-		cudaDeviceSynchronize();
-		cudaStatus = cudaGetLastError();
-		if (cudaStatus != cudaSuccess)
-			printf("CUDA error synchonizing the device after activity map was updated\n");
-
 		break;
 	}
 }
-__global__ void updateActivityMap(float * activityMap, int numberOfBodies, int gridDimmension){
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	activityMap[idx] /= numberOfBodies;
-	activityMap[idx] *= gridDimmension;
-}
-__global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, int numberOfBodies, float gridLimit, int gridDimmension){
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-	/* stores the values euclidian_x, euclidean_y, soft_norm as:
-	value.x <- euclidian_x
-	value.y <- euclidean_y
-	value.z <- soft_norm
-	*/
-	float3 value; 
-	float2 force;
-	float2 sum;
-	sum.x = 0; sum.y = 0;
-
-	for (int j = 0; j < numberOfBodies; j++){
-		// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
-		value.x = d_nbodies.x[j] - d_nbodies.x[idx];
-		value.y = d_nbodies.y[j] - d_nbodies.y[idx];
-		value.z = (float)pow(value.x * value.x + value.y * value.y + SOFTENING_2, 1.5f);
-		// this simation is independent for x or y
-		sum.x += (d_nbodies.m[j] * value.x) / value.z;
-		sum.y += (d_nbodies.m[j] * value.y) / value.z;
+__global__ void updateActivityMap(float * d_activityMap, const float inverse_numberOfBodies, const unsigned short gridDimmension, const unsigned short n2){
+	unsigned short idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx < n2){
+		d_activityMap[idx] *= inverse_numberOfBodies;
+		d_activityMap[idx] *= gridDimmension;
 	}
-	// Calculate the force
-	// F_i = G * m_i * sum
-	force.x = G * d_nbodies.m[idx] * sum.x;
-	force.y = G * d_nbodies.m[idx] * sum.y;
-
-	// simulate the movement
-
-	// calculate the position
-	// WE DO THIS FIRST due to its dependance on current velocity
-	// x_t+1 = x_t + dt * v_t
-	d_nbodies.x[idx] += dt * d_nbodies.vx[idx];
-	d_nbodies.y[idx] += dt * d_nbodies.vy[idx];
-
-	// update the velocity value 
-	// acceleration is also computed here, no need for independent computation
-	// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
-	d_nbodies.vx[idx] += dt * (force.x / d_nbodies.m[idx]);
-	d_nbodies.vy[idx] += dt * (force.y / d_nbodies.m[idx]);
-
-	/*
-	compute the position for a body in the activityMap and increase the
-	corresponding body count
-	index computed according to "The C programming guide" 2nd ed pp.113
-	*/
-	int col = (int)(d_nbodies.x[idx] / gridLimit);
-	int row = (int)(d_nbodies.y[idx] / gridLimit);
-	int cell = (int)(gridDimmension * row + col);
-	activityMap[cell] += 1.0f;
 }
+__global__ void parallelOverBodies(nbodies d_nbodies, float * d_activityMap, const int numberOfBodies, const float inv_gridLimit, const unsigned short gridDimmension){
+	unsigned short idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx < numberOfBodies){
+		float4 force = { 0.0f, 0.0f, 0.0f, 0.0f };
+		nbody body = { d_nbodies.x[idx], d_nbodies.y[idx], d_nbodies.vx[idx], d_nbodies.vy[idx], d_nbodies.m[idx] };
+		for (short block = 0; block < gridDim.x; block++){
+			__shared__ float s_x[THREADS_PER_BLOCK];
+			__shared__ float s_y[THREADS_PER_BLOCK];
+			__shared__ float s_m[THREADS_PER_BLOCK];
+			unsigned short tid = block * blockDim.x + threadIdx.x;
+			s_x[threadIdx.x] = d_nbodies.x[tid];
+			s_y[threadIdx.x] = d_nbodies.y[tid];
+			s_m[threadIdx.x] = d_nbodies.m[tid];
+			__syncthreads();
 
+			for (int j = 0; j < THREADS_PER_BLOCK; j++){
+				// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
+				float distance_x = s_x[j] - body.x;
+				float distance_y = s_y[j] - body.y;
+				
+				float dx_2 = distance_x * distance_x;
+				float dy_2 = distance_y * distance_y;
+				float subt = dx_2 + dy_2;
+				// CUDA reciprocal squared root. faster than 1/sqrt(x)
+				float inv_sqrt = rsqrtf(subt + SOFTENING_2);
+				float inv_sqrt_2 = inv_sqrt * inv_sqrt;
+				float inv_sqrt_3 =  inv_sqrt_2 * inv_sqrt;
+				// this sumation is independent for x or y
+				float mass_inv_sqrt_3 = s_m[j] * inv_sqrt_3;
+				force.z += mass_inv_sqrt_3 * distance_x;
+				force.w += mass_inv_sqrt_3 * distance_y;
+			}
+			__syncthreads();
+		}
+		// Calculate the force
+		// F_i = G * m_i * sum
+		force.x = G * body.m * force.z;
+		force.y = G * body.m * force.w;
+
+		// simulate the movement
+
+		// calculate the position
+		// WE DO THIS FIRST due to its dependance on current velocity
+		// x_t+1 = x_t + dt * v_t
+		d_nbodies.x[idx] += dt * body.vx;
+		d_nbodies.y[idx] += dt * body.vy;
+
+		// update the velocity value 
+		// acceleration is also computed here, no need for independent computation
+		// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
+		d_nbodies.vx[idx] += dt * force.x * d_nbodies.inv_m[idx];
+		d_nbodies.vy[idx] += dt * force.y * d_nbodies.inv_m[idx];
+
+		/*
+		compute the position for a body in the activityMap and increase the
+		corresponding body count
+		index computed according to "The C programming guide" 2nd ed pp.113
+		*/
+		unsigned short col = d_nbodies.x[idx] * inv_gridLimit;
+		unsigned short row = d_nbodies.y[idx] * inv_gridLimit;
+		unsigned short cell = gridDimmension * row + col;
+		
+		atomicAdd(&d_activityMap[cell], 1.0f);
+	}
+}
 void print_help(){
 	printf("nbody_%s N D M [-i I] [-i input_file]\n", USER_NAME);
 
@@ -519,7 +522,7 @@ returns:
 1 parameters specify visualisation run
 0 parameters specify simulation run
 */
-int operation_mode(const int argc, char **argv){
+short operation_mode(const int argc, char **argv){
 	if (argc < 3 || argc > 7){
 		return -1;
 	}
@@ -585,8 +588,9 @@ const char * buffer - the buffer to use as source
 output:
 int the number of commas
 */
-int countCommas(const char * buffer){
-	unsigned int i, commas = 0;
+short countCommas(const char * buffer){
+	unsigned int i;
+	unsigned short commas = 0;
 	// Check that the line contains 4 commas
 	for (i = 0; i < strlen(buffer); i++){
 		if (buffer[i] == ',')
@@ -639,6 +643,7 @@ void assignDefaultValuesSOA(int i){
 	h_nbodies.vx[i] = 0;
 	h_nbodies.vy[i] = 0;
 	h_nbodies.m[i] = 1.0f / (float)numberOfBodies;
+	h_nbodies.inv_m[i] = 1.0f / h_nbodies.m[i];
 }
 /*
 Loads the data from specified input file.
@@ -679,6 +684,7 @@ int fileReader(const char *filename){
 			sscanf(buffer, "%ff, %ff, %ff, %ff, %ff", &h_nbodies.x[body_count],
 				&h_nbodies.y[body_count], &h_nbodies.vx[body_count],
 				&h_nbodies.vy[body_count], &h_nbodies.m[body_count]);
+			h_nbodies.inv_m[body_count] = 1.0f / h_nbodies.m[body_count];
 			++body_count;
 		}
 	}
@@ -698,7 +704,7 @@ output:
 1 for a line successfully read
 */
 int readLine(char buffer[], FILE *f){
-	int i = 0;
+	unsigned short i = 0;
 	char c = 0;
 
 	while ((c = getc(f)) != '\n'){
