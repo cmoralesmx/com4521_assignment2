@@ -423,10 +423,15 @@ void step(void)
 		// First CUDA option
 		//parallelOverBodies << < blocksPerGrid, threadsPerBlock >> >(d_nbodies, d_activityMap, numberOfBodies, 1.0f/gridLimit, gridDimmension);
 		// second CUDA option
-		parallelBody2Body << <blocksPerGrid, threadsPerBlock >> >(d_nbodies, activityMap, numberOfBodies, 1.0f / gridLimit, gridDimmension, blocksPerGrid, threadsPerBlock);
-		cudaError_t cudaStatus = cudaGetLastError();
-		if (cudaStatus != cudaSuccess)
-			printf("CUDA error in bodies kernel\n");
+		cudaError_t cudaStatus
+		for (int i = 0; i < numberOfBodies; i++){
+			parallelBody2Body << <blocksPerGrid, threadsPerBlock >> >(x, y, d_nbodies, activityMap, numberOfBodies, 1.0f / gridLimit, gridDimmension, blocksPerGrid, threadsPerBlock);
+			cudaStatus = cudaGetLastError();
+			if (cudaStatus != cudaSuccess){
+				printf("CUDA error in bodies kernel\n");
+				break;
+			}
+		}
 		cudaDeviceSynchronize();
 		// sumation over shared
 		// pre-update activity matrix???
@@ -449,6 +454,7 @@ __global__ void updateActivityMap(float * d_activityMap, const float inverse_num
 }
 /*
 parallelOverBodies - The kernel computes the affecting forces per body.
+Each body is identified by the thread id (idx). The interactions agains all the other bodies are computed serially.
 */
 __global__ void parallelOverBodies(nbodies d_nbodies, float * d_activityMap, const int numberOfBodies, const float inv_gridLimit, const unsigned short gridDimm){
 	unsigned short idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -521,14 +527,14 @@ this kernel should compute, the amount of effect each body in matrix B has over 
 s_accum_vx[padding + threadIdx.x]
 s_accum_vy[padding + threadIdx.x]
 */
-__global__ void body2body(float l_x, float l_y,
-	float * s_x, float * s_y, 
-	float * s_vx, float * s_vy){
+__device__ void body2body(float l_x, float l_y,
+	float * s2_x, float * s2_y, 
+	float * s2_vx, float * s2_vy){
 
 //	unsigned short itid = blockIdx.x * blockDim.x + threadIdx.x;
 
-	float distance_x = s_x[threadIdx.x] - l_x;
-	float distance_y = s_y[threadIdx.x] - l_y;
+	float distance_x = s2_x[threadIdx.x] - l_x;
+	float distance_y = s2_y[threadIdx.x] - l_y;
 
 	float dx_2 = distance_x * distance_x;
 	float dy_2 = distance_y * distance_y;
@@ -538,20 +544,20 @@ __global__ void body2body(float l_x, float l_y,
 	float inv_sqrt_3 = inv_sqrt * inv_sqrt * inv_sqrt;
 	// this sumation is independent for x or y
 	//float mass_inv_sqrt_3 = l_m * inv_sqrt_3;
-	s_vx[threadIdx.x] = inv_sqrt_3 * distance_x;
-	s_vy[threadIdx.x] = inv_sqrt_3 * distance_y;
+	s2_vx[threadIdx.x] = inv_sqrt_3 * distance_x;
+	s2_vy[threadIdx.x] = inv_sqrt_3 * distance_y;
 }
 
-__global__ void sum_warp_kernel_shfl_down(float *a)
-{
-	float local_sum = a[threadIdx.x + blockIdx.x * blockDim.x];
-	for (int offset = WARP_SIZE / 2; offset>0; offset /= 2)
-		local_sum += __shfl_down(local_sum, offset);
-	if (threadIdx.x % WARP_SIZE == 0){
-		//printf("Warp max is %d", local_sum);
-		a[0] = local_sum;
-	}
-}
+//__global__ void sum_warp_kernel_shfl_down(float *a)
+//{
+//	float local_sum = a[threadIdx.x + blockIdx.x * blockDim.x];
+//	for (int offset = WARP_SIZE / 2; offset>0; offset /= 2)
+//		local_sum += __shfl_down(local_sum, offset);
+//	if (threadIdx.x % WARP_SIZE == 0){
+//		//printf("Warp max is %d", local_sum);
+//		a[0] = local_sum;
+//	}
+//}
 
 /*
 parallelBody2Body - This kernel computes the body-to-body interactions.
@@ -574,13 +580,15 @@ __global__ void parallelBody2Body(nbodies d_nbodies, float * d_activityMap, cons
 		float accum_vx = 0.0f;
 		float accum_vy = 0.0f;
 
-		// initiate te values
+		// load values from global memory to shared memory
 		s_x[threadIdx.x] = d_nbodies.x[tid];
 		s_y[threadIdx.x] = d_nbodies.y[tid];
 		s_m[threadIdx.x] = d_nbodies.m[tid];
 		s_inv_m[threadIdx.x] = d_nbodies.inv_m[tid];
+		// compute the n-body interactions w.r.t. body[tid]
 		for (int i = 0, tile = 0; i < numberOfBodies; i += THREADS_PER_BLOCK, tile++){
 			//unsigned short idx = tile * blockDim.x + threadIdx.x;
+			// s_vx[n] acts as shared storage for the accumulation of velocity over x and y for each body, identified by tid
 			for (int z = 0; z < THREADS_PER_BLOCK; z++){
 				s_vx[z] = 0.0f;
 				s_vy[z] = 0.0f;
@@ -590,8 +598,8 @@ __global__ void parallelBody2Body(nbodies d_nbodies, float * d_activityMap, cons
 			// should pass single values: s_x[tile], s_y[tile]
 			// pointers to address to begin reading the array at: d_nbodies.x[tile * blockDim.x], d_nbodies.y[tile * blockDim.x]
 			// pointers to array: s_vx, s_vy
-			body2body << <1, THREADS_PER_BLOCK >> >(s_x[threadIdx.x], s_y[threadIdx.x],
-				&d_nbodies.x[tile * blockDim.x], &d_nbodies.x[tile * blockDim.x], s_vx, s_vy);
+			body2body(s_x[threadIdx.x], s_y[threadIdx.x],&d_nbodies.x[tile * blockDim.x], 
+				&d_nbodies.x[tile * blockDim.x], s_vx, s_vy);
 			__syncthreads();
 			cudaError_t cudaStatus = cudaGetLastError();
 			if (cudaStatus != cudaSuccess)
