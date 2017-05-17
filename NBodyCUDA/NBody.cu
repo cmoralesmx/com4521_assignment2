@@ -13,6 +13,9 @@
 #define DEBUG 0
 #define ZERO 1e-6f
 #define THREADS_PER_BLOCK 512
+#define THREADS_PER_BLOCK2 64
+#define THREADS_PER_BLOCK2_2 4096
+#define WARP_SIZE 32
 
 struct nbodies{
 	float *x, *y, *vx, *vy, *m, *inv_m;
@@ -35,7 +38,9 @@ void displayData();
 __global__ void parallelOverBodies(nbodies d_nbodies, float * activityMap, const int numberOfBodies, const float gridLimit, const unsigned short gridDimmension);
 short allocateDeviceMemory();
 __global__ void updateActivityMap(float * activityMap, const float inverse_numberOfBodies, const unsigned short gridDimmension, const unsigned short n2);
-
+__global__ void body2body(float l_x, float l_y, float * s_x, float * s_y, float * s_vx, float * s_vy);
+__global__ void sum_warp_kernel_shfl_down(float *a);
+__global__ void parallelBody2Body(nbodies d_nbodies, float * d_activityMap, const int numberOfBodies, const float inv_gridLimit, const unsigned short gridDimm, const dim3 blocksPerGrid, const dim3 threadsPerBlock);
 MODE mode;
 int numberOfBodies;
 float inverse_numberOfBodies;
@@ -415,11 +420,17 @@ void step(void)
 		dim3 blocksPerGrid((numberOfBodies + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, 1);
 		dim3 threadsPerBlock(THREADS_PER_BLOCK, 1);
 		
-		parallelOverBodies << < blocksPerGrid, threadsPerBlock >> >(d_nbodies, d_activityMap, numberOfBodies, 1.0f/gridLimit, gridDimmension);
+		// First CUDA option
+		//parallelOverBodies << < blocksPerGrid, threadsPerBlock >> >(d_nbodies, d_activityMap, numberOfBodies, 1.0f/gridLimit, gridDimmension);
+		// second CUDA option
+		parallelBody2Body << <blocksPerGrid, threadsPerBlock >> >(d_nbodies, activityMap, numberOfBodies, 1.0f / gridLimit, gridDimmension, blocksPerGrid, threadsPerBlock);
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in bodies kernel\n");
 		
+		// sumation over shared
+		// pre-update activity matrix???
+
 		// launch the activity map updater kernel
 		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, inverse_numberOfBodies, gridDimmension, gridDimmension * gridDimmension);
 		cudaStatus = cudaGetLastError();
@@ -436,7 +447,10 @@ __global__ void updateActivityMap(float * d_activityMap, const float inverse_num
 		d_activityMap[idx] *= gridDimmension;
 	}
 }
-__global__ void parallelOverBodies(nbodies d_nbodies, float * d_activityMap, const int numberOfBodies, const float inv_gridLimit, const unsigned short gridDimmension){
+/*
+parallelOverBodies - The kernel computes the affecting forces per body.
+*/
+__global__ void parallelOverBodies(nbodies d_nbodies, float * d_activityMap, const int numberOfBodies, const float inv_gridLimit, const unsigned short gridDimm){
 	unsigned short idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx < numberOfBodies){
 		float4 force = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -496,9 +510,132 @@ __global__ void parallelOverBodies(nbodies d_nbodies, float * d_activityMap, con
 		*/
 		unsigned short col = d_nbodies.x[idx] * inv_gridLimit;
 		unsigned short row = d_nbodies.y[idx] * inv_gridLimit;
-		unsigned short cell = gridDimmension * row + col;
+		unsigned short cell = gridDimm * row + col;
 		
 		atomicAdd(&d_activityMap[cell], 1.0f);
+	}
+}
+
+/*
+this kernel should compute, the amount of effect each body in matrix B has over the bodies in matrix A
+s_accum_vx[padding + threadIdx.x]
+s_accum_vy[padding + threadIdx.x]
+*/
+__global__ void body2body(float l_x, float l_y,
+	float * s_x, float * s_y, 
+	float * s_vx, float * s_vy){
+
+//	unsigned short itid = blockIdx.x * blockDim.x + threadIdx.x;
+
+	float distance_x = s_x[threadIdx.x] - l_x;
+	float distance_y = s_y[threadIdx.x] - l_y;
+
+	float dx_2 = distance_x * distance_x;
+	float dy_2 = distance_y * distance_y;
+	float subt = dx_2 + dy_2;
+	// CUDA reciprocal squared root. faster than 1/sqrt(x)
+	float inv_sqrt = rsqrtf(subt + SOFTENING_2);
+	float inv_sqrt_3 = inv_sqrt * inv_sqrt * inv_sqrt;
+	// this sumation is independent for x or y
+	//float mass_inv_sqrt_3 = l_m * inv_sqrt_3;
+	s_vx[threadIdx.x] = inv_sqrt_3 * distance_x;
+	s_vy[threadIdx.x] = inv_sqrt_3 * distance_y;
+}
+
+__global__ void sum_warp_kernel_shfl_down(float *a)
+{
+	float local_sum = a[threadIdx.x + blockIdx.x * blockDim.x];
+	for (int offset = WARP_SIZE / 2; offset>0; offset /= 2)
+		local_sum += __shfl_down(local_sum, offset);
+	if (threadIdx.x % WARP_SIZE == 0){
+		//printf("Warp max is %d", local_sum);
+		a[0] = local_sum;
+	}
+}
+
+/*
+parallelBody2Body - This kernel computes the body-to-body interactions.
+
+*/
+__global__ void parallelBody2Body(nbodies d_nbodies, float * d_activityMap, const int numberOfBodies, 
+	const float inv_gridLimit, const unsigned short gridDimm, const dim3 blocksPerGrid, const dim3 threadsPerBlock){
+	unsigned short tid = blockDim.x * blockIdx.x + threadIdx.x;
+	if (tid < numberOfBodies){
+		// shared memory containers to use as the base for computation
+		__shared__ float s_x[THREADS_PER_BLOCK];
+		__shared__ float s_y[THREADS_PER_BLOCK];
+		__shared__ float s_vx[THREADS_PER_BLOCK];
+		__shared__ float s_vy[THREADS_PER_BLOCK];
+		__shared__ float s_m[THREADS_PER_BLOCK];
+		__shared__ float s_inv_m[THREADS_PER_BLOCK];
+		// l_* myPosition
+		//float l_x = d_nbodies.x[tid], l_y = d_nbodies.y[tid], l_m = d_nbodies.m[tid];
+		// temp accumulator for the velocity
+		float accum_vx = 0.0f;
+		float accum_vy = 0.0f;
+
+		// initiate te values
+		s_x[threadIdx.x] = d_nbodies.x[tid];
+		s_y[threadIdx.x] = d_nbodies.y[tid];
+		s_m[threadIdx.x] = d_nbodies.m[tid];
+		s_inv_m[threadIdx.x] = d_nbodies.inv_m[tid];
+		for (int i = 0, tile = 0; i < numberOfBodies; i += THREADS_PER_BLOCK, tile++){
+			//unsigned short idx = tile * blockDim.x + threadIdx.x;
+			for (int z = 0; z < THREADS_PER_BLOCK; z++){
+				s_vx[z] = 0.0f;
+				s_vy[z] = 0.0f;
+			}
+			__syncthreads();
+			// launch 1 block iteratively to compute the body 2 body interactions
+			// should pass single values: s_x[tile], s_y[tile]
+			// pointers to address to begin reading the array at: d_nbodies.x[tile * blockDim.x], d_nbodies.y[tile * blockDim.x]
+			// pointers to array: s_vx, s_vy
+			body2body << <1, threadsPerBlock >> >(s_x[threadIdx.x], s_y[threadIdx.x],
+				&d_nbodies.x[tile * blockDim.x], &d_nbodies.x[tile * blockDim.x], s_vx, s_vy);
+			__syncthreads();
+			// shuffle warp sum the computed values for this block
+			sum_warp_kernel_shfl_down << <blocksPerGrid, threadsPerBlock, 1 >> >(s_vx);
+			sum_warp_kernel_shfl_down << <blocksPerGrid, threadsPerBlock, 2 >> >(s_vy);
+			// accumulate the velocity values
+			accum_vx += s_vx[0];
+			accum_vy += s_vy[0];
+		}
+		// update the rest of the values
+		// Calculate the force
+		// F_i = G * m_i * sum
+		float force_x = G * s_m[threadIdx.x] * accum_vx;
+		float force_y = G * s_m[threadIdx.x] * accum_vy;
+
+		// simulate the movement
+		// these values should be output to the accumulator array for further reduction
+
+		// calculate the new position for this body
+		// x_t+1 = x_t + dt * v_t
+		s_x[threadIdx.x] += dt * accum_vx;
+		s_y[threadIdx.x] += dt * accum_vy;
+
+		// update the velocity value 
+		// acceleration is also computed here, no need for independent computation
+		// v_t+1 = v_t + dt * a  // acceleration a_i = F_i / m_i
+		s_vx[threadIdx.x] += dt * force_x * s_inv_m[tid]; // these seem to need sumation at the end
+		s_vy[threadIdx.x] += dt * force_y * s_inv_m[tid]; // needs to be fixed?
+
+		// save the values to global memory
+		d_nbodies.x[tid] = s_x[threadIdx.x];
+		d_nbodies.y[tid] = s_y[threadIdx.x];
+		d_nbodies.vx[tid] = s_vx[threadIdx.x];
+		d_nbodies.vy[tid] = s_vy[threadIdx.x];
+		///*
+		//compute the position for a body in the activityMap and increase the
+		//corresponding body count
+		//index computed according to "The C programming guide" 2nd ed pp.113
+		//*/
+		unsigned short col = s_x[threadIdx.x] * inv_gridLimit;
+		unsigned short row = s_y[threadIdx.x] * inv_gridLimit;
+		unsigned short cell = gridDimm * row + col;
+
+		atomicAdd(&d_activityMap[cell], 1.0f);
+
 	}
 }
 void print_help(){
