@@ -427,7 +427,7 @@ void step(void)
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
 			printf("CUDA error in bodies kernel\n");
-		
+		cudaDeviceSynchronize();
 		// sumation over shared
 		// pre-update activity matrix???
 
@@ -590,12 +590,22 @@ __global__ void parallelBody2Body(nbodies d_nbodies, float * d_activityMap, cons
 			// should pass single values: s_x[tile], s_y[tile]
 			// pointers to address to begin reading the array at: d_nbodies.x[tile * blockDim.x], d_nbodies.y[tile * blockDim.x]
 			// pointers to array: s_vx, s_vy
-			body2body << <1, threadsPerBlock >> >(s_x[threadIdx.x], s_y[threadIdx.x],
+			body2body << <1, THREADS_PER_BLOCK >> >(s_x[threadIdx.x], s_y[threadIdx.x],
 				&d_nbodies.x[tile * blockDim.x], &d_nbodies.x[tile * blockDim.x], s_vx, s_vy);
 			__syncthreads();
+			cudaError_t cudaStatus = cudaGetLastError();
+			if (cudaStatus != cudaSuccess)
+				printf("CUDA error in body2body\n");
+
 			// shuffle warp sum the computed values for this block
-			sum_warp_kernel_shfl_down << <blocksPerGrid, threadsPerBlock, 1 >> >(s_vx);
-			sum_warp_kernel_shfl_down << <blocksPerGrid, threadsPerBlock, 2 >> >(s_vy);
+			sum_warp_kernel_shfl_down << <1, THREADS_PER_BLOCK >> >(s_vx);
+			cudaStatus = cudaGetLastError();
+			if (cudaStatus != cudaSuccess)
+				printf("CUDA error in sum_warp_kernel_shfl_down x\n");
+			sum_warp_kernel_shfl_down << <1, THREADS_PER_BLOCK >> >(s_vy);
+			cudaStatus = cudaGetLastError();
+			if (cudaStatus != cudaSuccess)
+				printf("CUDA error in sum_warp_kernel_shfl_down y\n");
 			// accumulate the velocity values
 			accum_vx += s_vx[0];
 			accum_vy += s_vy[0];
@@ -635,7 +645,9 @@ __global__ void parallelBody2Body(nbodies d_nbodies, float * d_activityMap, cons
 		unsigned short cell = gridDimm * row + col;
 
 		atomicAdd(&d_activityMap[cell], 1.0f);
-
+		cudaError_t cudaStatus = cudaGetLastError();
+		if (cudaStatus != cudaSuccess)
+			printf("CUDA error in atomicAdd\n");
 	}
 }
 void print_help(){
