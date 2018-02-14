@@ -63,7 +63,6 @@ bool display_denisty = false;
 struct cudaGraphicsResource *cuda_nbody_vbo_resource;
 struct cudaGraphicsResource *cuda_hist_vbo_resource;
 
-
 //timing
 float elapsed = 0;
 float prev_time = 0;
@@ -330,7 +329,7 @@ void displayLoop(void)
 		blocks = N / 256;
 		if (N % 256 != 0)
 			blocks++;
-		//two possible formats for users to supplier body data
+		//two possible formats for users to supply body data
 		if (Bodies != 0){
 			copyNBodyData << <blocks, 256 >> >(dptr, Bodies, N);
 		}
