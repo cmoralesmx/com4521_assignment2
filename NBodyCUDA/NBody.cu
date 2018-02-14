@@ -63,7 +63,7 @@ int main(int argc, char *argv[]) {
 		numberOfBodies = atoi(argv[1]); // N
 		gridDimmension = atoi(argv[2]); // D
 		// calculate the ranges for the "bins" of the grid
-		gridLimit = 1.0f / (gridDimmension - 1);
+		gridLimit = 1.0f / gridDimmension; // (gridDimmension - 1);
 
 		if (DEBUG){
 			printf("Number of bodies: %d\n", numberOfBodies);
