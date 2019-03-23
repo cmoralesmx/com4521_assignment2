@@ -419,18 +419,27 @@ void step(void)
 		
 		parallelOverBodies << < blocksPerGrid, threadsPerBlock >> >(d_nbodies, d_activityMap, numberOfBodies, 1.0f/gridLimit, gridDimmension);
 		cudaError_t cudaStatus = cudaGetLastError();
-		if (cudaStatus != cudaSuccess)
+		if (cudaStatus != cudaSuccess) {
 			printf("CUDA error in bodies kernel: %d\n", cudaStatus);
+			printf(cudaGetErrorString(cudaStatus));
+			printf("\n");
+		}
 		
-		cudaDeviceSynchronize();
+		//cudaDeviceSynchronize();
+		cudaError_t cudaStatus2 = cudaGetLastError();
+		if (cudaStatus2 != cudaSuccess) {
+			printf("CUDA error inbetween kernels\n");
+			printf(cudaGetErrorString(cudaStatus2));
+			printf("\n");
+		}
 
 		// launch the activity map updater kernel
 		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, inverse_numberOfBodies, gridDimmension, gridDimmension * gridDimmension);
-		cudaError_t cudaStatus2 = cudaGetLastError();
-		if (cudaStatus2 != cudaSuccess)
+		cudaError_t cudaStatus3 = cudaGetLastError();
+		if (cudaStatus3 != cudaSuccess)
 			printf("CUDA error in activity map kernel\n");
 
-		cudaDeviceSynchronize();
+		//cudaDeviceSynchronize();
 		break;
 	}
 }
