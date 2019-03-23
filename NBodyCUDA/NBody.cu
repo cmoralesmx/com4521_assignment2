@@ -154,14 +154,15 @@ int main(int argc, char *argv[]) {
 	free(h_nbodies.m);
 	free(h_nbodies.inv_m);
 	if (mode == CUDA){
-		cudaDeviceReset();
-		cudaFree(&d_nbodies.x);
+		
+		/*cudaFree(&d_nbodies.x);
 		cudaFree(&d_nbodies.y);
 		cudaFree(&d_nbodies.vx);
 		cudaFree(&d_nbodies.vy);
 		cudaFree(&d_nbodies.m);
 		cudaFree(&d_nbodies.inv_m);
-		cudaFree(&d_activityMap);
+		cudaFree(&d_activityMap);*/
+		cudaDeviceReset();
 	}
 	
 	return 0;
@@ -245,7 +246,7 @@ short prepareData(const char * inputFilename){
 	}
 	if (mode == CUDA){
 		// copy host data to device
-		cudaError_t cudaStatus1, cudaStatus2, cudaStatus3, cudaStatus4, cudaStatus5, cudaStatus6;
+		cudaError_t cudaStatus1, cudaStatus2, cudaStatus3, cudaStatus4, cudaStatus5, cudaStatus6, cudaStatus7;
 		size_t size = sizeof(float) * numberOfBodies;
 		cudaStatus1 = cudaMemcpy(d_nbodies.x, h_nbodies.x, size, cudaMemcpyHostToDevice);
 		cudaStatus2 = cudaMemcpy(d_nbodies.y, h_nbodies.y, size, cudaMemcpyHostToDevice);
@@ -253,8 +254,9 @@ short prepareData(const char * inputFilename){
 		cudaStatus4 = cudaMemcpy(d_nbodies.vy, h_nbodies.vy, size, cudaMemcpyHostToDevice);
 		cudaStatus5 = cudaMemcpy(d_nbodies.m, h_nbodies.m, size, cudaMemcpyHostToDevice);
 		cudaStatus6 = cudaMemcpy(d_nbodies.inv_m, h_nbodies.inv_m, size, cudaMemcpyHostToDevice);
+		cudaStatus7 = cudaGetLastError();
 		if (cudaStatus1 != cudaSuccess || cudaStatus2 != cudaSuccess || cudaStatus3 != cudaSuccess
-			|| cudaStatus4 != cudaSuccess || cudaStatus5 != cudaSuccess || cudaStatus6 != cudaSuccess){
+			|| cudaStatus4 != cudaSuccess || cudaStatus5 != cudaSuccess || cudaStatus6 != cudaSuccess || cudaStatus7 != cudaSuccess){
 			if (DEBUG)
 				printf("ERROR copying host data to device\n");
 			return -2;
@@ -418,14 +420,17 @@ void step(void)
 		parallelOverBodies << < blocksPerGrid, threadsPerBlock >> >(d_nbodies, d_activityMap, numberOfBodies, 1.0f/gridLimit, gridDimmension);
 		cudaError_t cudaStatus = cudaGetLastError();
 		if (cudaStatus != cudaSuccess)
-			printf("CUDA error in bodies kernel\n");
+			printf("CUDA error in bodies kernel: %d\n", cudaStatus);
 		
+		cudaDeviceSynchronize();
+
 		// launch the activity map updater kernel
 		updateActivityMap << < blocksPerGrid, threadsPerBlock >> >(d_activityMap, inverse_numberOfBodies, gridDimmension, gridDimmension * gridDimmension);
-		cudaStatus = cudaGetLastError();
-		if (cudaStatus != cudaSuccess)
+		cudaError_t cudaStatus2 = cudaGetLastError();
+		if (cudaStatus2 != cudaSuccess)
 			printf("CUDA error in activity map kernel\n");
 
+		cudaDeviceSynchronize();
 		break;
 	}
 }
@@ -440,17 +445,25 @@ __global__ void parallelOverBodies(nbodies d_nbodies, float * d_activityMap, con
 	unsigned short idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx < numberOfBodies){
 		float4 force = { 0.0f, 0.0f, 0.0f, 0.0f };
+		// fetch a single body from the population
 		nbody body = { d_nbodies.x[idx], d_nbodies.y[idx], d_nbodies.vx[idx], d_nbodies.vy[idx], d_nbodies.m[idx] };
+		
+		// traverse the bodies by iterating in blocks of width THREADS_PER_BLOCK
 		for (short block = 0; block < gridDim.x; block++){
+			// declare shared memory arrays to hold the values of this block
 			__shared__ float s_x[THREADS_PER_BLOCK];
 			__shared__ float s_y[THREADS_PER_BLOCK];
 			__shared__ float s_m[THREADS_PER_BLOCK];
 			unsigned short tid = block * blockDim.x + threadIdx.x;
-			s_x[threadIdx.x] = d_nbodies.x[tid];
-			s_y[threadIdx.x] = d_nbodies.y[tid];
-			s_m[threadIdx.x] = d_nbodies.m[tid];
+			// fetch the data for body #tid from global memory and store it in the shared memory at position #threadIdx.x
+			if (tid < numberOfBodies) {
+				s_x[threadIdx.x] = d_nbodies.x[tid];
+				s_y[threadIdx.x] = d_nbodies.y[tid];
+				s_m[threadIdx.x] = d_nbodies.m[tid];
+			} // do I need to initialize the other values at zero?
 			__syncthreads();
 
+			// operate between this body and the data of this block
 			for (int j = 0; j < THREADS_PER_BLOCK; j++){
 				// m_j (x_j - x_i) / (|| x_j - x_i ||^2 + softening^2 )^(3/2)
 				float distance_x = s_x[j] - body.x;
